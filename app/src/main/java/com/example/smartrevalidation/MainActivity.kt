@@ -3,25 +3,26 @@ package com.example.smartrevalidation
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.util.Log
 import android.view.View
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
 import com.acesso.acessobio_android.*
 import com.acesso.acessobio_android.onboarding.AcessoBio
+import com.acesso.acessobio_android.onboarding.UnicoSDK
 import com.acesso.acessobio_android.onboarding.camera.CameraListener
 import com.acesso.acessobio_android.onboarding.camera.UnicoCheckCameraOpener
 import com.acesso.acessobio_android.onboarding.camera.document.DocumentCameraListener
 import com.acesso.acessobio_android.onboarding.models.Environment
+import com.acesso.acessobio_android.onboarding.models.PrepareInfo
 import com.acesso.acessobio_android.onboarding.types.DocumentType
 import com.acesso.acessobio_android.services.dto.ErrorBio
-import com.acesso.acessobio_android.services.dto.PrepareInfo
 import com.acesso.acessobio_android.services.dto.ResultCamera
 import com.acesso.acessobio_android.services.dto.SuccessResult
+import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -46,11 +47,6 @@ class MainActivity : AppCompatActivity(),
     private val timeout = 50.0
     private val CAMERA_PERMISSION_CODE = 1001
     private val TAG = "MainActivity"
-
-    private var pendingSilentAuthExternalUserId: String? = null
-    private var activeSilentAuthUserId: String? = null
-
-    private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -121,36 +117,19 @@ class MainActivity : AppCompatActivity(),
 
         addLog("Iniciando teste SilentAuth. externalUserId=$externalUserId")
 
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
-            == PackageManager.PERMISSION_GRANTED) {
-            startSilentAuthCamera(externalUserId)
-        } else {
-            addLog("Solicitando permissão de câmera para SilentAuth...")
-            pendingSilentAuthExternalUserId = externalUserId
-            ActivityCompat.requestPermissions(
-                this,
-                arrayOf(Manifest.permission.CAMERA),
-                CAMERA_PERMISSION_CODE
-            )
+        val sdk = UnicoSDK.getInstance()
+        if (sdk == null) {
+            addLog("Erro: UnicoSDK não inicializado.")
+            return
         }
-    }
 
-    private fun startSilentAuthCamera(externalUserId: String) {
-        activeSilentAuthUserId = externalUserId
-        try {
-            AcessoBio(this, this)
-                .setTheme(unicoTheme)
-                .setTimeoutSession(timeout)
-                .setEnvironment(Environment.UAT)
-                .build()
-                .prepareCamera(
-                    UnicoConfig(),
-                    this,
-                    PrepareInfo(externalUserId = externalUserId, useCase = null)
-                )
-        } catch (e: Exception) {
-            activeSilentAuthUserId = null
-            addLog("Erro no startSilentAuthCamera: ${e.message}")
+        lifecycleScope.launch {
+            val result = sdk.startSilentValidation(PrepareInfo(externalUserId, null))
+
+            result.onSuccess {
+                addLog("SilentAuth sucesso: ${it.success}")
+                createProcess(apiKey = silentAuthApiKey, externalUserId = externalUserId)
+            }.onFailure { addLog("SilentAuth erro: ${it.message}") }
         }
     }
 
@@ -211,13 +190,7 @@ class MainActivity : AppCompatActivity(),
         if (requestCode == CAMERA_PERMISSION_CODE) {
             if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
                 addLog("Permissão da câmera concedida.")
-                val silentAuthUserId = pendingSilentAuthExternalUserId
-                pendingSilentAuthExternalUserId = null
-                if (silentAuthUserId != null) {
-                    startSilentAuthCamera(silentAuthUserId)
-                } else {
-                    startCameraLiveness()
-                }
+                startCameraLiveness()
             } else {
                 addLog("Permissão da câmera negada pelo usuário.")
                 Toast.makeText(this, "Permissão da câmera é obrigatória para continuar.", Toast.LENGTH_LONG).show()
@@ -233,13 +206,11 @@ class MainActivity : AppCompatActivity(),
     override fun onUserClosedCameraManually() {
         addLog("Usuário fechou a câmera manualmente.")
         textField.text = "Camera fechada manualmente."
-        activeSilentAuthUserId = null
     }
 
     override fun onSystemClosedCameraTimeoutSession() {
         addLog("Sessão encerrada por timeout.")
         textField.text = "Tempo de sessão excedido."
-        activeSilentAuthUserId = null
     }
 
     override fun onSystemChangedTypeCameraTimeoutFaceInference() {
@@ -262,7 +233,6 @@ class MainActivity : AppCompatActivity(),
     override fun onErrorSelfie(error: ErrorBio?) {
         addLog("Erro na selfie: ${error.toString()}")
         textField.text = error.toString()
-        activeSilentAuthUserId = null
     }
 
     override fun onSuccess(result: SuccessResult) {
@@ -279,16 +249,6 @@ class MainActivity : AppCompatActivity(),
     }
 
     override fun onCameraReady(cameraOpener: UnicoCheckCameraOpener.Camera) {
-        val silentAuthUserId = activeSilentAuthUserId
-        if (silentAuthUserId != null) {
-            addLog("Coleta em background iniciada.")
-            activeSilentAuthUserId = null
-            mainHandler.postDelayed({
-                createProcess(apiKey = silentAuthApiKey, externalUserId = silentAuthUserId)
-            }, 15000)
-            return
-        }
-
         addLog("Camera pronta.")
         cameraOpener.open(this)
     }
@@ -296,7 +256,6 @@ class MainActivity : AppCompatActivity(),
     override fun onCameraFailed(error: String?) {
         addLog("Falha na câmera: $error")
         textField.text = error
-        activeSilentAuthUserId = null
     }
 
     override fun onSuccessDocument(result: ResultCamera?) {
